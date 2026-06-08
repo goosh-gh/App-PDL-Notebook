@@ -1,0 +1,90 @@
+#!/usr/bin/env perl
+use Mojolicious::Lite -signatures;
+use FindBin;
+use IPC::Open2 ();
+use JSON::PP ();
+use Mojo::IOLoop;
+use Mojo::IOLoop::Stream;
+
+# ---------------------------------------------------------------------------
+# pdl-notebook  --  the thin web layer.
+#
+#   browser  <--WebSocket-->  this server  <--pipes(NDJSON)-->  pdl-notebook-kernel
+#
+# Single kernel, single notebook (prototype). For multi-user, spawn one kernel
+# per WebSocket connection and key the routing table by connection id; the relay
+# is otherwise unchanged.
+#
+# Run from a source checkout:
+#     perl script/pdl-notebook daemon -l http://*:3000
+#   or, with auto-reload:
+#     morbo script/pdl-notebook
+# ---------------------------------------------------------------------------
+
+my $ROOT = "$FindBin::Bin/..";                       # dist root from script/
+push @{ app->static->paths }, "$ROOT/public";        # serve the frontend
+
+my $JSON = JSON::PP->new->utf8;
+
+# --- spawn the kernel -------------------------------------------------------
+my $kernel = "$FindBin::Bin/pdl-notebook-kernel";
+our ($KOUT, $KIN, $KPID, $kstream);                  # our, continued 
+$KPID = IPC::Open2::open2($KOUT, $KIN, $^X, $kernel);
+$KIN->autoflush(1);
+
+app->log->info("kernel pid $KPID ($kernel)");
+
+my %clients;        # ws connection id -> controller
+my $last_ready;     # cache the kernel's 'ready' line for late-joining clients
+
+# --- pump kernel stdout -> all clients --------------------------------------
+my $buf = '';
+$kstream = Mojo::IOLoop::Stream->new($KOUT);
+$kstream->on(read => sub ($s, $bytes) {
+    $buf .= $bytes;
+    while ($buf =~ s/^(.*?)\n//) {
+        my $line = $1;
+        next unless length $line;
+
+        $last_ready = $line if $line =~ /"state":"ready"/;
+        utf8::decode($line);                 # kernel UTF-8 byte lines are sent as text 
+        $_->send($line) for values %clients;
+
+
+    }
+});
+$kstream->on(close => sub { app->log->warn('kernel stream closed') });
+$kstream->timeout(0);                        # timeout is not effective 
+Mojo::IOLoop->stream($kstream);
+
+# --- routes -----------------------------------------------------------------
+get '/' => sub ($c) { $c->reply->static('index.html') };
+
+websocket '/ws' => sub ($c) {
+    my $cid = "$c";
+    $c->inactivity_timeout(0);          # notebooks can sit idle for a long time
+    $clients{$cid} = $c;
+    $c->send($last_ready) if $last_ready;
+
+    $c->on(message => sub ($c, $msg) {
+        utf8::encode($msg) if utf8::is_utf8($msg);   # Mojo wide-char characters  →  UTF-8 byte codes 
+        my $req = eval { $JSON->decode($msg) };
+        app->log->info("ws decode: " . (defined $req ? "ok" : "FAIL $@"));
+        return unless $req;
+
+
+        my $type = $req->{type} // '';
+        if ($type eq 'run') {
+            print {$KIN} $JSON->encode({ id => $req->{id}, code => $req->{code} }), "\n";
+        }
+        elsif ($type eq 'interrupt') {
+            kill 'INT', $KPID if $KPID;   # the running cell's $SIG{INT} catches it
+        }
+        # HOOK (reactive): forward {type=>'event',...} to the kernel here.
+    });
+    $c->on(finish => sub { delete $clients{$cid} });
+};
+
+END { kill 'TERM', $KPID if $KPID }     # tidy up the child on exit
+
+app->start;

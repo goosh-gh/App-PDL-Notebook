@@ -1,0 +1,10 @@
+download/
+*.old
+server.log
+blib/
+Makefile
+!Makefile.PL
+MYMETA.*
+pm_to_blib
+*.o
+*.bs

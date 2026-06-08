@@ -1,0 +1,149 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use utf8;
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+use JSON::PP ();
+use App::PDL::Notebook::Display ();
+
+# ---------------------------------------------------------------------------
+# pdl-notebook-kernel  --  one persistent Perl/PDL interpreter, one cell at a time.
+#
+# Protocol: newline-delimited JSON, both directions.
+#   in  (stdin):  {"id":N,"code":"..."}
+#   out (stdout): {"id":N,"type":"stdout|stderr|display|result|error|status", ...}
+#
+# A child of script/pdl-notebook. Kept out-of-process on purpose: a runaway cell
+# is interrupted with SIGINT, and if that fails the parent can SIGKILL and
+# respawn without taking the web server down.
+# ---------------------------------------------------------------------------
+
+# Dup the real stdout to a private protocol channel BEFORE user code can touch
+# STDOUT. Everything the kernel emits goes here; cell prints are captured
+# separately and reframed as stdout messages.
+open(my $PROTO, '>&', \*STDOUT) or die "dup stdout: $!";
+$PROTO->autoflush(1);
+binmode($PROTO, ':raw');
+
+my $JSON = JSON::PP->new->utf8;
+
+sub emit {
+    my ($msg) = @_;
+    print {$PROTO} $JSON->encode($msg), "\n";
+    return;
+}
+
+# --- lexical persistence ----------------------------------------------------
+# Lexical::Persistence makes `my $x = ...` survive across cells (the trick
+# Reply / Devel::REPL use). Without it we eval in a fixed package, where
+# `our`/package vars persist but `my` does not.
+my $LP = eval { require Lexical::Persistence; Lexical::Persistence->new };
+
+# --- inline figures ---------------------------------------------------------
+# Register a publisher with the Cairo inline backend, if it is installed. The
+# backend produces the bytes; we just route them to the display queue. This is
+# the only coupling to the graphics stack, and it is soft: no backend, no plots,
+# everything else still works. (See docs/inline-backend.md.)
+eval {
+    die "inline disabled\n" unless $ENV{PDLNB_INLINE};   # ← 追加
+    require PDL::Graphics::Cairo::Backend::Inline;
+    PDL::Graphics::Cairo::Backend::Inline::set_publisher(sub {
+        my ($mime, $bytes) = @_;
+        App::PDL::Notebook::Display::publish_png($bytes)  if $mime eq 'image/png';
+        App::PDL::Notebook::Display::publish_svg($bytes)  if $mime eq 'image/svg+xml';
+        App::PDL::Notebook::Display::publish_html($bytes) if $mime eq 'text/html';
+    });
+    1;
+};
+
+# Pull PDL + the plotting stack into the cell namespace. Adjust to taste; this
+# is the one PDL-specific line in the kernel.
+my $PRELUDE = <<'PERL';
+use strict; use warnings;
+use PDL;
+use PDL::NiceSlice;
+# use PDL::Graphics::Cairo;   # uncomment once the inline backend is installed
+PERL
+
+eval { run_code(0, $PRELUDE); 1 }       # warm the interpreter (id 0 = bootstrap)
+    or emit({ id => 0, type => 'error', text => "prelude failed: $@" });
+
+emit({ id => 0, type => 'status', state => 'ready',
+       lexical_persistence => ($LP ? JSON::PP::true : JSON::PP::false) });
+
+# Ignore SIGINT while idle (the parent may fire it between cells); the per-cell
+# handler below re-enables it as an interrupt.
+$SIG{INT} = 'IGNORE';
+$SIG{PIPE} = 'IGNORE';   # WS 切断時のパイプ書き込みで kernel を即死させない
+
+local $/ = "\n";
+while (my $line = <STDIN>) {
+    chomp $line;
+    next unless length $line;
+    my $req = eval { $JSON->decode($line) };
+    next unless $req && defined $req->{code};
+    # HOOK (reactive): a future {"type":"event",...} message routes to
+    # App::PDL::Notebook::Reactive::handle_event here instead of run_cell.
+    run_cell($req->{id}, $req->{code});
+}
+
+# ---------------------------------------------------------------------------
+
+sub run_cell {
+    my ($id, $code) = @_;
+    App::PDL::Notebook::Display::reset_queue();
+
+    if ($code =~ /\x{3000}/) {
+        my @lines = split /\n/, $code;
+        my @hit = grep { $lines[$_] =~ /\x{3000}/ } 0 .. $#lines;
+        my $where = join ', ', map { $_ + 1 } @hit;
+        emit({ id => $id, type => 'stderr',
+               text => "warning: fullwidth space (U+3000) on line $where "
+                     . "/ 全角スペースを行 $where に検出。"
+                     . "コード部ならエラーになります（コメント/文字列内なら無視可）。\n" });
+    }
+
+    my ($out, $err, @result) = ('', '');
+    {
+        local $SIG{INT} = sub { die "Interrupted\n" };
+        open(my $oh, '>', \$out) or die $!;
+        open(my $eh, '>', \$err) or die $!;
+        binmode($oh, ':encoding(UTF-8)');   # cell の print(日本語) を UTF-8 で受ける
+        binmode($eh, ':encoding(UTF-8)');
+        local *STDOUT = $oh;     # cell prints captured, NOT sent to $PROTO
+        local *STDERR = $eh;
+        @result = eval { run_code($id, $code) };
+    }
+    my $error = $@;
+
+    utf8::decode($out);   # UTF-8 バイト列 -> 文字列（JSON->utf8 encode と整合）
+    utf8::decode($err);
+
+    emit({ id => $id, type => 'stdout', text => $out }) if length $out;
+    emit({ id => $id, type => 'stderr', text => $err }) if length $err;
+
+    for my $d (@App::PDL::Notebook::Display::QUEUE) {
+        emit({ id => $id, type => 'display', mime => $d->{mime}, data => $d->{data} });
+    }
+
+    if ($error) {
+        emit({ id => $id, type => 'error', text => "$error" });
+    }
+    elsif (@result) {
+        my ($mime, $data) = App::PDL::Notebook::Display::repr($result[-1]);
+        emit({ id => $id, type => 'result', mime => $mime, data => $data })
+            if defined $mime;
+    }
+
+    emit({ id => $id, type => 'status', state => 'idle' });
+    return;
+}
+
+sub run_code {
+    my ($id, $code) = @_;
+    return $LP->do($code) if $LP;            # may throw; outer eval catches it
+    my @r = eval "package App::PDL::Notebook::Sandbox;\n$code";  ## no critic (StringyEval)
+    die $@ if $@;
+    return @r;
+}

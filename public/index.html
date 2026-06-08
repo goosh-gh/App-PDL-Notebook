@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDL Notebook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<style>
+  :root{
+    --paper:#f7f5f0; --ink:#211f1b; --muted:#6f6a60; --line:#e2ddd2;
+    --rust:#b5532f; --rust-soft:#f0e2da; --ok:#3f7d4f; --err:#a8322a;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;
+    --sans:"IBM Plex Sans",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px}
+  header{
+    position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;
+    padding:12px 22px;background:rgba(247,245,240,.92);backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line);
+  }
+  header h1{font-size:15px;font-weight:600;letter-spacing:.02em;margin:0}
+  header h1 .dot{color:var(--rust)}
+  .pill{font-family:var(--mono);font-size:12px;padding:3px 10px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted);background:#fff}
+  .pill.ready{color:var(--ok);border-color:#cfe2d3}
+  .spacer{flex:1}
+  button.bar{font-family:var(--sans);font-size:13px;font-weight:500;cursor:pointer;
+    border:1px solid var(--line);background:#fff;color:var(--ink);
+    padding:6px 13px;border-radius:7px}
+  button.bar:hover{border-color:var(--rust);color:var(--rust)}
+  main{max-width:880px;margin:26px auto 120px;padding:0 22px}
+  .note{font-size:12.5px;color:var(--muted);margin:0 0 18px;font-family:var(--mono)}
+
+  .cell{display:flex;gap:12px;margin:0 0 18px;align-items:flex-start}
+  .run{flex:0 0 auto;margin-top:6px;width:30px;height:30px;border-radius:7px;
+    border:1px solid var(--line);background:#fff;color:var(--rust);cursor:pointer;
+    font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center}
+  .run:hover{background:var(--rust-soft)}
+  .run[disabled]{color:var(--muted);cursor:default;background:#fff}
+  .body{flex:1;min-width:0}
+  .editor{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
+  .CodeMirror{height:auto;font-family:var(--mono);font-size:13.5px;line-height:1.55;
+    background:#fff;color:var(--ink)}
+  .CodeMirror-gutters{background:#fbfaf7;border-right:1px solid var(--line)}
+  .CodeMirror-linenumber{color:#bdb6a8}
+  .CodeMirror-cursor{border-left:1.5px solid var(--rust)}
+
+  .out{margin-top:7px;display:flex;flex-direction:column;gap:7px}
+  .out:empty{margin:0}
+  .out pre{margin:0;font-family:var(--mono);font-size:13px;line-height:1.5;
+    white-space:pre-wrap;word-break:break-word;padding:9px 12px;border-radius:7px;
+    border:1px solid var(--line);background:#fff;overflow-x:auto}
+  .out pre.stderr{color:#7a5a14;background:#fdf7e8;border-color:#efe2bf}
+  .out pre.error{color:var(--err);background:#fbeeec;border-color:#f0cfca}
+  .out pre.result{border-style:dashed;color:var(--muted)}
+  .out .fig{padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}
+  .out .fig img,.out .fig svg{max-width:100%;height:auto;display:block}
+</style>
+</head>
+<body>
+<header>
+  <h1>PDL<span class="dot">·</span>Notebook</h1>
+  <span class="pill" id="status">connecting…</span>
+  <span class="spacer"></span>
+  <button class="bar" id="interrupt">Interrupt</button>
+  <button class="bar" id="addcell">+ Cell</button>
+</header>
+<main>
+  <p class="note" id="lexnote"></p>
+  <div id="cells"></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/perl/perl.min.js"></script>
+<script>
+const cellsEl = document.getElementById('cells');
+const statusEl = document.getElementById('status');
+const lexnote  = document.getElementById('lexnote');
+
+let runSeq = 0;                 // monotonic id per execution
+const active = new Map();       // runId -> {outEl, runBtn}
+let ws, kernelReady = false;
+
+function connect(){
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen    = () => { statusEl.textContent = 'kernel: connected'; };
+  ws.onclose   = () => { statusEl.textContent = 'kernel: disconnected'; statusEl.className='pill'; };
+  ws.onmessage = (e) => handle(JSON.parse(e.data));
+}
+
+function handle(m){
+  if (m.type === 'status' && m.state === 'ready'){
+    kernelReady = true;
+    statusEl.textContent = 'kernel: ready';
+    statusEl.className = 'pill ready';
+    if (m.lexical_persistence === false)
+      lexnote.textContent = '⚠ Lexical::Persistence not found — `my` variables will not persist across cells (install it, or use `our`/package vars).';
+    return;
+  }
+  const run = active.get(m.id);
+  if (!run) return;                         // bootstrap (id 0) etc.
+  const out = run.outEl;
+
+  if (m.type === 'stdout')      appendStream(out, 'stdout', m.text);
+  else if (m.type === 'stderr') appendStream(out, 'stderr', m.text);
+  else if (m.type === 'error')  out.appendChild(pre('error', m.text));
+//   else if (m.type === 'result') out.appendChild(pre('result', m.data));
+  else if (m.type === 'result'){
+    if (m.mime === 'image/svg+xml' || m.mime === 'image/png' || m.mime === 'text/html')
+      renderDisplay(out, m);                 // 図は result でも絵として描く
+    else
+      out.appendChild(pre('result', m.data)); // それ以外は従来どおりテキスト
+  }
+  else if (m.type === 'display') renderDisplay(out, m);
+  else if (m.type === 'status' && m.state === 'idle'){
+    run.runBtn.disabled = false;
+    run.runBtn.textContent = '▶';
+    active.delete(m.id);
+  }
+}
+
+function pre(cls, text){
+  const p = document.createElement('pre');
+  if (cls) p.className = cls;
+  p.textContent = text;
+  return p;
+}
+
+function appendStream(out, cls, text){      // keep contiguous stdout in one block
+  let last = out.lastElementChild;
+  if (last && last.tagName === 'PRE' && last.classList.contains('_'+cls)){
+    last.textContent += text;
+  } else {
+    const p = pre(cls === 'stderr' ? 'stderr' : '', text);
+    p.classList.add('_'+cls);
+    out.appendChild(p);
+  }
+}
+
+function renderDisplay(out, m){
+  const fig = document.createElement('div');
+  fig.className = 'fig';
+  if (m.mime === 'image/png'){
+    const img = document.createElement('img');
+    img.src = 'data:image/png;base64,' + m.data;
+    fig.appendChild(img);
+
+  } else if (m.mime === 'image/svg+xml'){
+    // strip the XML prolog / doctype so the browser parses the <svg> as markup
+    const svg = m.data.replace(/^\s*<\?xml[^>]*\?>\s*/i, '')
+                      .replace(/^\s*<!DOCTYPE[^>]*>\s*/i, '');
+    fig.innerHTML = svg;
+  } else if (m.mime === 'text/html'){
+    fig.innerHTML = m.data;
+  } else {
+    fig.appendChild(pre('', m.data));
+  }
+  out.appendChild(fig);
+}
+
+function runCell(cm, runBtn, outEl){
+  if (!kernelReady || ws.readyState !== 1) return;
+  outEl.innerHTML = '';
+  const id = ++runSeq;
+  active.set(id, { outEl, runBtn });
+  runBtn.disabled = true;
+  runBtn.textContent = '…';
+  ws.send(JSON.stringify({ type:'run', id, code: cm.getValue() }));
+}
+
+function addCell(code=''){
+  const cell = document.createElement('div'); cell.className = 'cell';
+  const runBtn = document.createElement('button'); runBtn.className='run'; runBtn.textContent='▶';
+  const body = document.createElement('div'); body.className='body';
+  const edWrap = document.createElement('div'); edWrap.className='editor';
+  const ta = document.createElement('textarea'); ta.value = code;
+  const outEl = document.createElement('div'); outEl.className='out';
+  edWrap.appendChild(ta); body.appendChild(edWrap); body.appendChild(outEl);
+  cell.appendChild(runBtn); cell.appendChild(body);
+  cellsEl.appendChild(cell);
+
+  const cm = CodeMirror.fromTextArea(ta, {
+    mode:'perl', lineNumbers:true, indentUnit:4, tabSize:4,
+    viewportMargin: Infinity,
+    extraKeys:{ 'Shift-Enter': () => runCell(cm, runBtn, outEl) }
+  });
+  runBtn.addEventListener('click', () => runCell(cm, runBtn, outEl));
+  cm.focus();
+  return cm;
+}
+
+document.getElementById('addcell').addEventListener('click', () => addCell());
+document.getElementById('interrupt').addEventListener('click', () => {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'interrupt' }));
+});
+
+connect();
+addCell('# Shift-Enter to run.  The last expression is shown as the result.\nmy $x = sequence(5);\n$x ** 2;');
+</script>
+</body>
+</html>
