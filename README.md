@@ -12,6 +12,46 @@ script/pdl-notebook          ← Mojolicious::Lite, relay only
 script/pdl-notebook-kernel   ← persistent PDL interpreter, one cell at a time
 ```
 
+## Examples
+
+End a cell with a figure object and it renders inline. The format is chosen
+automatically from the figure's contents: vector **SVG** for line/scatter plots,
+raster **PNG** for `imshow`/`contourf` (which would bloat as SVG).
+
+### Line plot → inline SVG
+
+```perl
+use PDL;
+use PDL::Graphics::Cairo;
+my $x = sequence(300) / 30;
+my ($fig, $ax) = PDL::Graphics::Cairo::subplots(1, 1, width => 800, height => 450);
+$ax->line($x, sin($x) * exp(-$x/8), color => 'royalblue', label => 'damped sin');
+$ax->legend();
+$ax->set_grid(1);
+$fig->tight_layout;
+$fig;
+```
+
+![Damped sine line plot, rendered inline as SVG](docs/SShot_damped_sin.png)
+
+### imshow → inline PNG
+
+```perl
+use PDL;
+use PDL::Graphics::Cairo;
+my $n  = 120;
+my $x  = (sequence($n) - $n/2) / 12;
+my $xx = $x->dummy(0, $n);
+my $yy = $x->dummy(1, $n);
+my $z  = sin($xx) * cos($yy);
+my ($fig, $ax) = PDL::Graphics::Cairo::subplots();
+$ax->imshow($z, cmap => 'viridis');
+$fig->tight_layout;
+$fig;
+```
+
+![Interference-fringe heatmap, rendered inline as PNG](docs/SShot_interf_fringe.png)
+
 ## Layout
 
 ```
@@ -19,78 +59,92 @@ App_PDL_Notebook/                         (~/src/App_PDL_Notebook ; dist: App-PD
 ├── Makefile.PL
 ├── cpanfile
 ├── README.md
+├── LICENSE
 ├── lib/App/PDL/
 │   ├── Notebook.pm                        main module + overview/contracts
 │   └── Notebook/
 │       ├── Display.pm                     per-cell output queue + repr()
 │       └── Reactive.pm                    reactive param/event registry (skeleton)
 ├── script/
-│   ├── pdl-notebook                       server entry  (perl script/pdl-notebook daemon …)
-│   └── pdl-notebook-kernel                kernel entry  (spawned by the server)
+│   ├── pdl-notebook                       server entry
+│   ├── pdl-notebook-kernel                kernel entry (spawned by the server)
+│   └── probe_pgc.pl                       diagnostic: backend / save-method discovery
 ├── public/
 │   └── index.html                         the notebook UI
 ├── docs/
-│   ├── inline-backend.md                  contract for PDL::Graphics::Cairo::Backend::Inline
-│   └── reactive-controls.md               the "drop Prima" control-channel design
+│   ├── inline-backend.md                  contract for an optional Cairo inline backend
+│   ├── reactive-controls.md               the "drop Prima" control-channel design
+│   └── *.png                              screenshots
 └── t/
     └── 00-load.t
 ```
 
-The Cairo inline backend is **not** in this dist by design — it speaks piddles,
-so it belongs in `PDL::Graphics::Cairo` as `Backend::Inline`. This dist stays
-graphics-agnostic and meets it through a callback (see `docs/inline-backend.md`).
+The notebook machinery is deliberately PDL-agnostic; PDL enters only through the
+kernel's default prelude and the rich-display path. Inline figures work because
+`PDL::Graphics::Cairo::Figure` provides `to_svg`/`to_png`/`to_inline`, which the
+notebook's `repr()` picks up by duck-typing — no coupling back to the notebook.
 
 ## Install / run
 
 ```sh
-# prerequisites
-cpanm Mojolicious Lexical::Persistence       # + PDL on your system already
-# (Lexical::Persistence is optional; without it `my` vars don't persist across cells)
+# prerequisites (use the same perl that has PDL — e.g. MacPorts perl5.40)
+cpanm Mojolicious Lexical::Persistence       # + PDL and PDL::Graphics::Cairo
+# Lexical::Persistence is optional; without it `my` vars don't persist across cells
 
 # run from the checkout
 export PERL5LIB=~/src/PDL_Graphics_Cairo/lib:$PERL5LIB   # + your own module paths
-perl script/pdl-notebook daemon -l http://*:3000
-#   or, with auto-reload during development:
-morbo script/pdl-notebook
+perl script/pdl-notebook daemon -l 'http://*:3000'
 
 # then open http://localhost:3000
 ```
 
+After editing the kernel or server, stop with **Ctrl-C and restart** this
+command — the server spawns a persistent kernel subprocess, so a plain restart
+is the reliable way to pick up changes. (Mojolicious' `morbo` auto-reload is
+*not* used here: reloading would respawn the kernel on every file change and
+lose all cell state.)
+
 The kernel inherits the server's environment, so PDL and your own modules just
 need to be on `PERL5LIB` when you launch.
 
-## Will it run after download?
+## Status — what works
 
-**Yes — for the notebook itself**, once the prerequisites are present:
+- Browser cells → persistent kernel → PDL → figure → **inline display**, with
+  automatic SVG (line/scatter) vs PNG (`imshow`/`contourf`) selection.
+- `stdout` / `stderr` / errors / last-expression result, framed per cell.
+- **Full UTF-8** in and out (Japanese in code, comments, prints, and results).
+- A warning when a fullwidth space (U+3000) sneaks into code, since Perl rejects it.
+- Persistent `my` variables across cells (with `Lexical::Persistence`).
+- Cell interrupt via the Interrupt button (SIGINT); idle-stable kernel.
 
-| works out of the box (Perl + Mojolicious + PDL) | needs one more step |
-|---|---|
-| editing cells, Shift-Enter to run | **inline figures** — install/​wire `PDL::Graphics::Cairo::Backend::Inline` (it's not in this dist; see `docs/inline-backend.md`). Until then plotting either opens a window or no-ops. |
-| `stdout` / `stderr` / errors per cell | **`my` persistence across cells** — needs `Lexical::Persistence`; without it use `our`/package vars (the UI shows a one-line warning). |
-| last-expression result, PDL repr | **reactive controls** (sliders/toggles/buttons) — registry exists, but not yet wired into the kernel loop or frontend (`docs/reactive-controls.md`). |
-| interrupt button (SIGINT) | the browser fetches CodeMirror + fonts from CDNs, so the **frontend needs internet** (or vendor those assets locally). |
+## Not yet wired (next steps)
 
-Quick sanity check without a browser:
+- **Reactive controls** — sliders / toggles / buttons that re-render a figure on
+  change. The generic registry (`Reactive.pm`) and protocol design exist
+  (`docs/reactive-controls.md`); kernel/frontend wiring is the next task.
+- **Optional inline backend** — `docs/inline-backend.md` describes a publisher
+  contract for a `PDL::Graphics::Cairo::Backend::Inline` (for figures emitted
+  mid-cell via a `display` message). Not required for the end-of-cell figures
+  above, which work through `repr()` + `to_inline`.
+- **`.ipynb` interop** — the on-disk format is just JSON; reading/writing it for
+  Jupyter portability is a small optional addition.
 
-```sh
-prove -Ilib t/                               # load + registry + repr tests
-printf '%s\n' '{"id":1,"code":"my $x = sequence(5); $x**2"}' \
-  | perl -Ilib script/pdl-notebook-kernel    # should emit a result frame
-```
-
-## Known limitations (deliberately left to tighten)
+## Known limitations
 
 - **Single kernel, single user.** Multi-user → one kernel per WebSocket
   connection, keyed by connection id; the relay is otherwise unchanged.
 - **Output capture is Perl-level only.** `local *STDOUT` catches Perl prints, but
   C-level writes to fd 1 (some PDL/Cairo paths) bypass it *and* would corrupt the
   protocol, since the channel is a dup of fd 1. The clean fix is to move the
-  protocol onto a dedicated fd (e.g. fd 3) and redirect fd 1/2 at the OS level
-  around each cell.
+  protocol onto a dedicated fd and redirect fd 1/2 at the OS level around each cell.
 - **Interrupt = SIGINT** turns a running cell into a catchable `die`; for a wedged
   cell, have the server `SIGKILL` and respawn.
 - **`public/` is resolved relative to `script/`.** Run from the checkout; an
   installed copy would want `File::ShareDir`.
-- **`.ipynb` interop** not implemented (the on-disk format is just JSON — a small,
-  optional addition for Jupyter portability).
-```
+- The browser fetches CodeMirror and fonts from CDNs, so the frontend needs
+  internet (or vendor those assets locally).
+
+## License
+
+Same terms as Perl itself (see `LICENSE`). Consistent with `Makefile.PL`'s
+`LICENSE => 'perl_5'` and with the PDL ecosystem it builds on.
