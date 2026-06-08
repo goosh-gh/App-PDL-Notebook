@@ -23,7 +23,7 @@ WriteMakefile(
     # Recommended but not required -- the core is PDL-agnostic and degrades:
     #   Lexical::Persistence   `my` variables persist across cells
     #   PDL                    the point of the notebook
-    #   PDL::Graphics::Cairo   with Backend::Inline, for inline figures
+    # NOT on CPAN (install from GitHub, see README): PDL::Graphics::Cairo, PDL::IO::PNG, better to have these!
     TEST_REQUIRES => { 'Test::More' => 0 },
 
     META_MERGE => {
@@ -33,7 +33,6 @@ WriteMakefile(
                 recommends => {
                     'Lexical::Persistence' => 0,
                     'PDL'                  => 0,
-                    'PDL::Graphics::Cairo' => 0,
                 },
             },
         },

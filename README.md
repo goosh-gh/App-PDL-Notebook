@@ -87,9 +87,21 @@ notebook's `repr()` picks up by duck-typing — no coupling back to the notebook
 ## Install / run
 
 ```sh
-# prerequisites (use the same perl that has PDL — e.g. MacPorts perl5.40)
+# prerequisites (use the same perl that has PDL)
 cpanm Mojolicious Lexical::Persistence       # + PDL and PDL::Graphics::Cairo
 # Lexical::Persistence is optional; without it `my` vars don't persist across cells
+
+## Dependencies not on CPAN
+
+This notebook renders figures via **PDL::Graphics::Cairo**, which (along with
+**PDL::IO::PNG**) is distributed on GitHub, not CPAN. Install from source:
+
+    git clone https://github.com/goosh-gh/PDL-Graphics-Cairo.git
+    cd PDL-Graphics-Cairo && perl Makefile.PL && make && make install
+
+(Or add its `lib/` to PERL5LIB instead of installing.) PDL itself is on CPAN
+(`cpanm PDL`). Without PDL::Graphics::Cairo the notebook still runs — you just
+get no inline figures.
 
 # run from the checkout
 export PERL5LIB=~/src/PDL_Graphics_Cairo/lib:$PERL5LIB   # + your own module paths
