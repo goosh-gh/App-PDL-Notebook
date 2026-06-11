@@ -12,6 +12,37 @@ script/pdl-notebook          ← Mojolicious::Lite, relay only
 script/pdl-notebook-kernel   ← persistent PDL interpreter, one cell at a time
 ```
 
+## Quick Start
+
+```sh
+# 1. Install prerequisites
+cpanm Mojolicious Lexical::Persistence
+
+# 2. Install PDL::Graphics::Cairo from GitHub
+git clone https://github.com/goosh-gh/PDL-Graphics-Cairo.git
+cd PDL-Graphics-Cairo && perl Makefile.PL && make && make install
+cd ..
+
+# 3. Clone and launch the notebook
+git clone https://github.com/goosh-gh/App-PDL-Notebook.git
+cd App-PDL-Notebook
+perl -I/path/to/PDL-Graphics-Cairo/lib script/pdl-notebook daemon
+```
+
+4. Open **http://localhost:3000** in your browser.
+5. Type code in a cell and press **Shift-Enter** to run it.
+6. The last expression in a cell is displayed as a result — if it is a
+   `PDL::Graphics::Cairo::Figure`, it renders inline as SVG or PNG automatically.
+7. `my` variables persist across cells (requires `Lexical::Persistence`).
+8. Use the **✕** button to interrupt a running cell.
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| Shift-Enter | Run cell |
+| Ctrl-Enter  | Run cell (stay in cell) |
+
 ## Examples
 
 End a cell with a figure object and it renders inline. The format is chosen
