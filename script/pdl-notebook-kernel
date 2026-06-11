@@ -6,6 +6,7 @@ use FindBin;
 use lib "$FindBin::Bin/../lib";
 use JSON::PP ();
 use App::PDL::Notebook::Display ();
+use App::PDL::Notebook::Reactive ();
 
 # ---------------------------------------------------------------------------
 # pdl-notebook-kernel  --  one persistent Perl/PDL interpreter, one cell at a time.
@@ -82,10 +83,23 @@ while (my $line = <STDIN>) {
     chomp $line;
     next unless length $line;
     my $req = eval { $JSON->decode($line) };
-    next unless $req && defined $req->{code};
-    # HOOK (reactive): a future {"type":"event",...} message routes to
-    # App::PDL::Notebook::Reactive::handle_event here instead of run_cell.
-    run_cell($req->{id}, $req->{code});
+    next unless $req && (defined $req->{code} || ($req->{type}//'') eq 'event');
+    my $type = $req->{type} // 'run';
+    if ($type eq 'event') {
+        # slider/toggle/button から来るイベント: 値を更新してハンドラを再実行
+        App::PDL::Notebook::Reactive::handle_event(
+            $req->{control}, $req->{value});
+        # ハンドラが display キューに積んだ出力を流す
+        for my $d (@App::PDL::Notebook::Display::QUEUE) {
+            emit({ id => ($req->{id} // 0), type => 'display',
+                   mime => $d->{mime}, data => $d->{data} });
+        }
+        App::PDL::Notebook::Display::reset_queue();
+        emit({ id => ($req->{id} // 0), type => 'status', state => 'idle' });
+    }
+    else {
+        run_cell($req->{id}, $req->{code});
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -125,6 +139,12 @@ sub run_cell {
 
     for my $d (@App::PDL::Notebook::Display::QUEUE) {
         emit({ id => $id, type => 'display', mime => $d->{mime}, data => $d->{data} });
+    }
+
+    # widgets: Reactive に宣言されたパラメータがあればフロントに descriptor を送る
+    my $specs = App::PDL::Notebook::Reactive::descriptors();
+    if (@$specs) {
+        emit({ id => $id, type => 'widgets', specs => $specs });
     }
 
     if ($error) {

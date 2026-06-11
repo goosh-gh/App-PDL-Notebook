@@ -29,7 +29,9 @@ my $JSON = JSON::PP->new->utf8;
 # --- spawn the kernel -------------------------------------------------------
 my $kernel = "$FindBin::Bin/pdl-notebook-kernel";
 our ($KOUT, $KIN, $KPID, $kstream);                  # our, continued 
-$KPID = IPC::Open2::open2($KOUT, $KIN, $^X, $kernel);
+# @INC をそのまま kernel に引き継ぐ
+my @inc_flags = map { "-I$_" } @INC;
+$KPID = IPC::Open2::open2($KOUT, $KIN, $^X, @inc_flags, $kernel);
 $KIN->autoflush(1);
 
 app->log->info("kernel pid $KPID ($kernel)");
@@ -80,7 +82,11 @@ websocket '/ws' => sub ($c) {
         elsif ($type eq 'interrupt') {
             kill 'INT', $KPID if $KPID;   # the running cell's $SIG{INT} catches it
         }
-        # HOOK (reactive): forward {type=>'event',...} to the kernel here.
+        elsif ($type eq 'event') {
+            # reactive slider/toggle/button event -> そのままカーネルへ転送
+            print {$KIN} $JSON->encode($req), "\n";
+        }
+        # (future hook point)
     });
     $c->on(finish => sub { delete $clients{$cid} });
 };

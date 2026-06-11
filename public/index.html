@@ -57,6 +57,15 @@
   .out pre.stderr{color:#7a5a14;background:#fdf7e8;border-color:#efe2bf}
   .out pre.error{color:var(--err);background:#fbeeec;border-color:#f0cfca}
   .out pre.result{border-style:dashed;color:var(--muted)}
+  .widgets{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;padding:8px 10px;
+    background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;align-items:center}
+  .widgets label{display:flex;flex-direction:column;gap:3px;font-size:12px;
+    color:#444;min-width:120px}
+  .widgets input[type=range]{width:180px}
+  .widgets input[type=checkbox]{width:18px;height:18px}
+  .widgets select{font-size:12px;padding:2px 4px}
+  .widgets button.wbtn{font-size:12px;padding:3px 10px;border-radius:4px;
+    border:1px solid #888;background:#fff;cursor:pointer}
   .out .fig{padding:10px;border:1px solid var(--line);border-radius:8px;background:#fff}
   .out .fig img,.out .fig svg{max-width:100%;height:auto;display:block}
 </style>
@@ -82,7 +91,8 @@ const statusEl = document.getElementById('status');
 const lexnote  = document.getElementById('lexnote');
 
 let runSeq = 0;                 // monotonic id per execution
-const active = new Map();       // runId -> {outEl, runBtn}
+const active  = new Map();       // runId -> {outEl, runBtn}
+const cellOut = new Map();       // runId -> outEl  (persistent, survives idle)
 let ws, kernelReady = false;
 
 function connect(){
@@ -102,8 +112,9 @@ function handle(m){
     return;
   }
   const run = active.get(m.id);
-  if (!run) return;                         // bootstrap (id 0) etc.
-  const out = run.outEl;
+  // event-driven redraws arrive after idle: fall back to cellOut
+  const out = run ? run.outEl : cellOut.get(m.id);
+  if (!out) return;                         // bootstrap (id 0) etc.
 
   if (m.type === 'stdout')      appendStream(out, 'stdout', m.text);
   else if (m.type === 'stderr') appendStream(out, 'stderr', m.text);
@@ -116,10 +127,14 @@ function handle(m){
       out.appendChild(pre('result', m.data)); // それ以外は従来どおりテキスト
   }
   else if (m.type === 'display') renderDisplay(out, m);
+  else if (m.type === 'widgets') renderWidgets(out, m.id, m.specs);
   else if (m.type === 'status' && m.state === 'idle'){
-    run.runBtn.disabled = false;
-    run.runBtn.textContent = '▶';
-    active.delete(m.id);
+    if (run) {
+      run.runBtn.disabled = false;
+      run.runBtn.textContent = '▶';
+      active.delete(m.id);
+      // cellOut は残す — event-driven redraws がここに描く
+    }
   }
 }
 
@@ -142,8 +157,13 @@ function appendStream(out, cls, text){      // keep contiguous stdout in one blo
 }
 
 function renderDisplay(out, m){
+  // event-driven redraws: 既存の図を消して置き換える
+  if (!active.has(m.id)) {
+    const prev = out.querySelector('.fig-display');
+    if (prev) prev.remove();
+  }
   const fig = document.createElement('div');
-  fig.className = 'fig';
+  fig.className = 'fig fig-display';
   if (m.mime === 'image/png'){
     const img = document.createElement('img');
     img.src = 'data:image/png;base64,' + m.data;
@@ -162,11 +182,103 @@ function renderDisplay(out, m){
   out.appendChild(fig);
 }
 
+
+// --- Reactive widgets -------------------------------------------------------
+// debounce timers: control name -> timer id
+const _wDebounce = {};
+
+function sendEvent(name, value, id) {
+  if (ws && ws.readyState === 1)
+    ws.send(JSON.stringify({ type: 'event', control: name, value, id: id ?? 0 }));
+}
+
+function renderWidgets(out, cellId, specs) {
+  // 同セルの既存 .widgets を置き換え
+  const prev = out.querySelector('.widgets');
+  if (prev) prev.remove();
+  if (!specs || specs.length === 0) return;
+
+  const box = document.createElement('div');
+  box.className = 'widgets';
+
+  for (const s of specs) {
+    const lbl = document.createElement('label');
+    const caption = document.createElement('span');
+    caption.textContent = s.label ?? s.name;
+
+    if (s.type === 'number') {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min   = s.min   ?? 0;
+      slider.max   = s.max   ?? 1;
+      slider.step  = s.step  ?? 0.01;
+      slider.value = s.value ?? 0;
+      const valSpan = document.createElement('span');
+      valSpan.style.cssText = 'font-size:11px;min-width:38px;text-align:right;color:#333';
+      valSpan.textContent = Number(s.value).toFixed(
+        String(s.step ?? 0.01).includes('.') ?
+          String(s.step ?? 0.01).split('.')[1].length : 0
+      );
+      slider.addEventListener('input', () => {
+        const v = parseFloat(slider.value);
+        valSpan.textContent = v.toFixed(
+          String(s.step ?? 0.01).includes('.') ?
+            String(s.step ?? 0.01).split('.')[1].length : 0
+        );
+        // debounce 80ms — continuous drags are coalesced
+        clearTimeout(_wDebounce[s.name]);
+        _wDebounce[s.name] = setTimeout(() => sendEvent(s.name, v, cellId), 80);
+      });
+      row.appendChild(slider);
+      row.appendChild(valSpan);
+      lbl.appendChild(caption);
+      lbl.appendChild(row);
+
+    } else if (s.type === 'bool') {
+      const cb = document.createElement('input');
+      cb.type    = 'checkbox';
+      cb.checked = !!s.value;
+      cb.addEventListener('change', () => sendEvent(s.name, cb.checked ? 1 : 0, cellId));
+      lbl.appendChild(caption);
+      lbl.appendChild(cb);
+
+    } else if (s.type === 'enum') {
+      const sel = document.createElement('select');
+      for (const opt of (s.options ?? [])) {
+        const o = document.createElement('option');
+        o.value = opt; o.textContent = opt;
+        if (opt === s.value) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => sendEvent(s.name, sel.value, cellId));
+      lbl.appendChild(caption);
+      lbl.appendChild(sel);
+
+    } else if (s.type === 'button') {
+      const btn = document.createElement('button');
+      btn.className = 'wbtn';
+      btn.textContent = s.label ?? s.name;
+      btn.addEventListener('click', () => sendEvent(s.name, 1, cellId));
+      lbl.appendChild(btn);
+
+    } else {
+      lbl.textContent = `[unknown widget type: ${s.type}]`;
+    }
+
+    box.appendChild(lbl);
+  }
+  out.appendChild(box);
+}
+// ---------------------------------------------------------------------------
+
 function runCell(cm, runBtn, outEl){
   if (!kernelReady || ws.readyState !== 1) return;
   outEl.innerHTML = '';
   const id = ++runSeq;
   active.set(id, { outEl, runBtn });
+  cellOut.set(id, outEl);   // event-driven redraws 用に永続保持
   runBtn.disabled = true;
   runBtn.textContent = '…';
   ws.send(JSON.stringify({ type:'run', id, code: cm.getValue() }));
