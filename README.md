@@ -52,6 +52,30 @@ $fig;
 
 ![Interference-fringe heatmap, rendered inline as PNG](docs/SShot_interf_fringe.png)
 
+### Reactive slider → live re-render
+
+```perl
+use PDL;
+use App::PDL::Notebook::Reactive;
+use App::PDL::Notebook::Display;
+use PDL::Graphics::Cairo qw(subplots);
+
+App::PDL::Notebook::Reactive::reset();
+App::PDL::Notebook::Reactive::param(
+    'freq', 1.0, type=>'number', min=>0.1, max=>5.0, step=>0.1, label=>'Frequency');
+
+my $draw = sub {
+    my $f = App::PDL::Notebook::Reactive::value('freq');
+    my $x = sequence(200) / 200 * 2 * 3.14159265;
+    my ($fig, @ax) = subplots(1, 1, figsize => [5, 2.5]);
+    $ax[0]->line($x, sin($f * $x), color=>'steelblue', lw=>1.5);
+    $ax[0]->set_title("freq=$f");
+    App::PDL::Notebook::Display::publish($fig->to_inline);
+};
+App::PDL::Notebook::Reactive::on_change($draw);
+$draw->();
+```
+
 ## Layout
 
 ```
@@ -64,7 +88,7 @@ App_PDL_Notebook/                         (~/src/App_PDL_Notebook ; dist: App-PD
 │   ├── Notebook.pm                        main module + overview/contracts
 │   └── Notebook/
 │       ├── Display.pm                     per-cell output queue + repr()
-│       └── Reactive.pm                    reactive param/event registry (skeleton)
+│       └── Reactive.pm                    reactive param/event/widget registry
 ├── script/
 │   ├── pdl-notebook                       server entry
 │   ├── pdl-notebook-kernel                kernel entry (spawned by the server)
@@ -76,7 +100,8 @@ App_PDL_Notebook/                         (~/src/App_PDL_Notebook ; dist: App-PD
 │   ├── reactive-controls.md               the "drop Prima" control-channel design
 │   └── *.png                              screenshots
 └── t/
-    └── 00-load.t
+    ├── 00-load.t
+    └── 01-reactive.t
 ```
 
 The notebook machinery is deliberately PDL-agnostic; PDL enters only through the
@@ -103,9 +128,8 @@ This notebook renders figures via **PDL::Graphics::Cairo**, which (along with
 (`cpanm PDL`). Without PDL::Graphics::Cairo the notebook still runs — you just
 get no inline figures.
 
-# run from the checkout
-export PERL5LIB=~/src/PDL_Graphics_Cairo/lib:$PERL5LIB   # + your own module paths
-perl script/pdl-notebook daemon -l 'http://*:3000'
+# run from the checkout (use absolute path; ~ is not always expanded in -I)
+perl -I/Users/goosh/src/PDL_Graphics_Cairo/lib script/pdl-notebook daemon
 
 # then open http://localhost:3000
 ```
@@ -116,8 +140,10 @@ is the reliable way to pick up changes. (Mojolicious' `morbo` auto-reload is
 *not* used here: reloading would respawn the kernel on every file change and
 lose all cell state.)
 
-The kernel inherits the server's environment, so PDL and your own modules just
-need to be on `PERL5LIB` when you launch.
+The server passes its `@INC` to the kernel subprocess via `-I` flags, so any
+module path visible to the server is also visible to the kernel. Use `-I` or
+`PERL5LIB` when launching — but prefer absolute paths, as `~/src/...` is not
+always shell-expanded inside `-I`.
 
 ## Status — what works
 
@@ -128,12 +154,11 @@ need to be on `PERL5LIB` when you launch.
 - A warning when a fullwidth space (U+3000) sneaks into code, since Perl rejects it.
 - Persistent `my` variables across cells (with `Lexical::Persistence`).
 - Cell interrupt via the Interrupt button (SIGINT); idle-stable kernel.
+- **Reactive controls** — sliders, checkboxes, dropdowns, and buttons that
+  re-render inline figures on change, with 80 ms debounce.
 
 ## Not yet wired (next steps)
 
-- **Reactive controls** — sliders / toggles / buttons that re-render a figure on
-  change. The generic registry (`Reactive.pm`) and protocol design exist
-  (`docs/reactive-controls.md`); kernel/frontend wiring is the next task.
 - **Optional inline backend** — `docs/inline-backend.md` describes a publisher
   contract for a `PDL::Graphics::Cairo::Backend::Inline` (for figures emitted
   mid-cell via a `display` message). Not required for the end-of-cell figures
