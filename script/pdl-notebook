@@ -31,6 +31,8 @@ my $kernel = "$FindBin::Bin/pdl-notebook-kernel";
 our ($KOUT, $KIN, $KPID, $kstream);                  # our, continued 
 # @INC をそのまま kernel に引き継ぐ
 my @inc_flags = map { "-I$_" } @INC;
+# カーネルプロセスにインラインdisplayモードを通知
+local $ENV{PDLNB_INLINE} = 1;
 $KPID = IPC::Open2::open2($KOUT, $KIN, $^X, @inc_flags, $kernel);
 $KIN->autoflush(1);
 
