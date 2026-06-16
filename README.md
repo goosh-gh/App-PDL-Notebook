@@ -83,6 +83,32 @@ $fig;
 
 ![Interference-fringe heatmap, rendered inline as PNG](docs/SShot_interf_fringe.png)
 
+### EEG viewer — MNE `raw.plot()` style
+
+Load real Nihon Kohden `.EEG` data (or synthetic demo) and explore it with
+browser sliders. Requires [PDL::EEG](https://github.com/goosh-gh/PDL-EEG) for
+real data; demo mode needs no extra modules.
+
+```perl
+use lib '/path/to/PDL-EEG/lib';
+use lib '/path/to/PDL-Graphics-Cairo/lib';
+use PDL;
+
+# Demo mode (34-channel synthetic EEG, 30 s):
+do '/path/to/App-PDL-Notebook/examples/notebook_eeg_raw.pl';
+
+# Real data (Nihon Kohden .EEG):
+local @ARGV = ('/path/to/recording.EEG');
+do '/path/to/App-PDL-Notebook/examples/notebook_eeg_raw.pl';
+```
+
+Five reactive controls appear below the figure: **Position** (time scroll),
+**Window** (time window in ms), **Gain** (µV/div: 10–1000), **Ch offset**
+(channel scroll), and **Neg-up** toggle. Each slider change triggers a full
+re-render at ~7 ms/frame (LTTB downsampling, 8 channels visible, 900 px wide).
+
+![EEG viewer in notebook cell](docs/SShot_damped_sin.png)
+
 ### Reactive slider → live re-render
 
 ```perl
@@ -187,6 +213,10 @@ always shell-expanded inside `-I`.
 - Cell interrupt via the Interrupt button (SIGINT); idle-stable kernel.
 - **Reactive controls** — sliders, checkboxes, dropdowns, and buttons that
   re-render inline figures on change, with 80 ms debounce.
+- **EEG viewer** — `examples/notebook_eeg_raw.pl` implements a full MNE
+  `raw.plot()`-style viewer: multi-channel waveform display with LTTB
+  downsampling, browser-based Position/Window/Gain/Ch-offset/Neg-up controls,
+  and support for real Nihon Kohden `.EEG` files via `PDL::EEG`.
 
 ## Not yet wired (next steps)
 
@@ -195,7 +225,9 @@ always shell-expanded inside `-I`.
   mid-cell via a `display` message). Not required for the end-of-cell figures
   above, which work through `repr()` + `to_inline`.
 - **`.ipynb` interop** — the on-disk format is just JSON; reading/writing it for
-  Jupyter portability is a small optional addition.
+  Jupyter portability is planned (App-PDL-Notebook04).
+- **Cell persistence** — browser cells are lost on page reload; save/load
+  support (own format or `.ipynb`) is a planned addition.
 
 ## Known limitations
 

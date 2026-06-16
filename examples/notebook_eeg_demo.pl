@@ -19,6 +19,7 @@
 
 use strict;
 use warnings;
+no warnings 'redefine';
 use utf8;
 use PDL;
 eval { require PDL::NiceSlice; PDL::NiceSlice->import; 1 };  # あれば使う
@@ -86,8 +87,8 @@ my $eeg = do {
 my $fig0 = figure(width => 900, height => 700);
 
 my $gain     = $fig0->param('gain',   150,
-    type => 'number', min => 10,  max => 500, step => 10,
-    label => 'Gain (±μV)', group => 'eeg');
+    type => 'number', min => 10,  max => 1000, step => 10,
+    label => "Gain (±μV)", group => 'eeg');
 
 my $t_win_ms = $fig0->param('t_win', 1000,
     type => 'number', min => 100, max => int($T_SEC * 1000), step => 100,
