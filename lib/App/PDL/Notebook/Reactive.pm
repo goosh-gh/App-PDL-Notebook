@@ -48,6 +48,15 @@ sub param {
 
 sub value { exists $PARAM{$_[0]} ? $PARAM{$_[0]}{value} : undef }
 
+# set_value: overwrite a param value without firing callbacks
+# Used internally (e.g. _key handler updates _pos before calling $render)
+sub set_value {
+    my ($name, $val) = @_;
+    return unless exists $PARAM{$name};
+    $PARAM{$name}{value} = $val unless $PARAM{$name}{type} eq 'button';
+    return;
+}
+
 # a button is just an event-typed param with no persistent value
 sub button {
     my ($name, %opt) = @_;
@@ -72,6 +81,13 @@ sub descriptors {
 # handle one inbound control event: update the value, re-run affected closures
 sub handle_event {
     my ($name, $val) = @_;
+    # _key is a synthetic event (ArrowLeft/Right) — not declared as a param,
+    # but we route it to the '_key' handler group so cells can listen with:
+    #   on_change(sub{ ... }, '_key');
+    if ($name eq '_key') {
+        $_->($name, $val) for @{ $HANDLER{_key} // [] };
+        return;
+    }
     return unless exists $PARAM{$name};
     $PARAM{$name}{value} = $val unless $PARAM{$name}{type} eq 'button';
     my $group = $PARAM{$name}{group} // '_default';

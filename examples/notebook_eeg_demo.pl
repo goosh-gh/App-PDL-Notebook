@@ -98,6 +98,14 @@ my $t0_ms    = $fig0->param('t0',       0,
     type => 'number', min => 0, max => int(($T_SEC - 0.1) * 1000), step => 50,
     label => 'Start (ms)', group => 'eeg');
 
+# チャンネル選択テキストボックス: カンマ区切りでチャンネル名を指定
+# 例: "Fp1,F3,Cz,O1"  空欄 = 全チャンネル表示
+my $ch_sel_str = $fig0->param('channels', '',
+    type  => 'text',
+    label => 'Channels (comma-separated, empty=all)',
+    placeholder => 'e.g. Fp1,F3,Cz,O1',
+    group => 'eeg');
+
 # ===========================================================================
 # 2. render クロージャ（LTTB 使用）
 # ===========================================================================
@@ -111,6 +119,14 @@ my $render = sub {
                       App::PDL::Notebook::Reactive::value('gain') }    // $gain;
     my $twin = eval { App::PDL::Notebook::Reactive::value('t_win') }   // $t_win_ms;
     my $t0   = eval { App::PDL::Notebook::Reactive::value('t0') }      // $t0_ms;
+    my $ch_str = eval { App::PDL::Notebook::Reactive::value('channels') } // $ch_sel_str;
+
+    # チャンネル選択: 空 = 全表示、カンマ区切り = 指定チャンネルのみ
+    my %sel_ch;
+    if (defined $ch_str && $ch_str =~ /\S/) {
+        %sel_ch = map { my $n = $_; $n =~ s/^\s+|\s+$//g; $n => 1 }
+                  split /,/, $ch_str;
+    }
 
     # 表示区間インデックス
     my $idx0 = int($t0             / 1000 * $SRATE);
@@ -135,6 +151,16 @@ my $render = sub {
         my ($r, $c, $name) = @{$LAYOUT[$i]}{qw(r c n)};
         $used{"$r,$c"} = 1;
         my $ax = $rows[$r][$c];
+
+        # チャンネル選択フィルタ: %sel_ch が空 = 全チャンネル表示
+        if (%sel_ch && !$sel_ch{$name}) {
+            # 選択外: パネルを空白にしてチャンネル名だけグレーで表示
+            $ax->xlim($t0, $t0 + $twin);
+            $ax->ylim($g, -$g);
+            $ax->text($t0 + $twin * 0.03, -$g * 0.72, $name,
+                ha => 'left', va => 'top', fontsize => 7, color => '#cccccc');
+            next;
+        }
 
         my $y_full = $eeg->slice("($i),$idx0:$idx1")->squeeze;
 
@@ -177,11 +203,17 @@ my $render = sub {
             ha => 'left', va => 'top', fontsize => 9, color => '#2c3e50');
         $ax->text(0.05, 0.28, sprintf("Start: %.0f ms", $t0),
             ha => 'left', va => 'top', fontsize => 9, color => '#2c3e50');
+        # 選択チャンネル数 / 全チャンネル数
+        my $ch_label = %sel_ch
+            ? sprintf("Ch: %d/%d", scalar(grep { $sel_ch{$_->{n}} } @LAYOUT), $N_CH)
+            : "Ch: all ($N_CH)";
+        $ax->text(0.05, 0.10, $ch_label,
+            ha => 'left', va => 'top', fontsize => 8, color => '#27ae60');
         my $pts_str   = ($ns_view > $n_lttb)
             ? sprintf("LTTB: %d->%d", $ns_view, $n_lttb)
             : sprintf("Full: %d pts", $ns_view);
         my $pts_color = ($ns_view > $n_lttb) ? '#27ae60' : '#7f8c8d';
-        $ax->text(0.05, 0.10, $pts_str,
+        $ax->text(0.05, -0.12, $pts_str,
             ha => 'left', va => 'top', fontsize => 8, color => $pts_color);
     }
 

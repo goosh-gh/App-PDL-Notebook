@@ -36,11 +36,18 @@
   .note{font-size:12.5px;color:var(--muted);margin:0 0 18px;font-family:var(--mono)}
 
   .cell{display:flex;gap:12px;margin:0 0 18px;align-items:flex-start}
-  .run{flex:0 0 auto;margin-top:6px;width:30px;height:30px;border-radius:7px;
+  .cell.drag-over{outline:2px dashed var(--rust);outline-offset:2px;border-radius:8px}
+  .cell-ctrl{flex:0 0 auto;display:flex;flex-direction:column;gap:4px;align-items:center;margin-top:6px}
+  .run{width:30px;height:30px;border-radius:7px;
     border:1px solid var(--line);background:#fff;color:var(--rust);cursor:pointer;
     font-size:13px;line-height:1;display:flex;align-items:center;justify-content:center}
   .run:hover{background:var(--rust-soft)}
   .run[disabled]{color:var(--muted);cursor:default;background:#fff}
+  .cmdbtn{width:30px;height:22px;border-radius:5px;border:1px solid var(--line);
+    background:#fff;color:var(--muted);cursor:pointer;font-size:11px;line-height:1;
+    display:flex;align-items:center;justify-content:center;padding:0}
+  .cmdbtn:hover{border-color:var(--rust);color:var(--rust)}
+  .delbtn:hover{border-color:#c0392b;color:#c0392b;background:#fbeeec}
   .body{flex:1;min-width:0}
   .editor{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#fff}
   .CodeMirror{height:auto;font-family:var(--mono);font-size:13.5px;line-height:1.55;
@@ -76,6 +83,9 @@
   <span class="pill" id="status">connecting…</span>
   <span class="spacer"></span>
   <button class="bar" id="interrupt">Interrupt</button>
+  <button class="bar" id="savebtn">💾 Save</button>
+  <button class="bar" id="loadbtn">📂 Load</button>
+  <input type="file" id="loadfile" accept=".pdlnb,.json" style="display:none">
   <button class="bar" id="addcell">+ Cell</button>
 </header>
 <main>
@@ -94,6 +104,7 @@ let runSeq = 0;                 // monotonic id per execution
 const active  = new Map();       // runId -> {outEl, runBtn}
 const cellOut = new Map();       // runId -> outEl  (persistent, survives idle)
 let ws, kernelReady = false;
+let _lastCellId = 0;            // most-recently run cell, for _key routing
 
 function connect(){
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -263,6 +274,19 @@ function renderWidgets(out, cellId, specs) {
       btn.addEventListener('click', () => sendEvent(s.name, 1, cellId));
       lbl.appendChild(btn);
 
+    } else if (s.type === 'text') {
+      // テキストボックス: Enter または focusout で送信
+      const inp = document.createElement('input');
+      inp.type        = 'text';
+      inp.value       = s.value ?? '';
+      inp.placeholder = s.placeholder ?? '';
+      inp.style.cssText = 'font-size:12px;padding:3px 6px;border:1px solid #ccc;border-radius:4px;width:220px;font-family:var(--mono)';
+      const fire = () => sendEvent(s.name, inp.value, cellId);
+      inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); fire(); } });
+      inp.addEventListener('blur', fire);
+      lbl.appendChild(caption);
+      lbl.appendChild(inp);
+
     } else {
       lbl.textContent = `[unknown widget type: ${s.type}]`;
     }
@@ -271,12 +295,17 @@ function renderWidgets(out, cellId, specs) {
   }
   out.appendChild(box);
 }
-// ---------------------------------------------------------------------------
 
-function runCell(cm, runBtn, outEl){
+// ---------------------------------------------------------------------------
+// Cell management
+// ---------------------------------------------------------------------------
+let cellSeq = 0;  // monotonic DOM-level cell id (separate from runSeq)
+
+function runCell(cm, runBtn, outEl, cellId){
   if (!kernelReady || ws.readyState !== 1) return;
   outEl.innerHTML = '';
   const id = ++runSeq;
+  _lastCellId = cellId ?? id;   // _key events target this cell
   active.set(id, { outEl, runBtn });
   cellOut.set(id, outEl);   // event-driven redraws 用に永続保持
   runBtn.disabled = true;
@@ -284,34 +313,179 @@ function runCell(cm, runBtn, outEl){
   ws.send(JSON.stringify({ type:'run', id, code: cm.getValue() }));
 }
 
-function addCell(code=''){
-  const cell = document.createElement('div'); cell.className = 'cell';
+function getCells(){
+  return Array.from(cellsEl.querySelectorAll('.cell'));
+}
+
+function moveCell(cell, dir){
+  const cells = getCells();
+  const idx = cells.indexOf(cell);
+  if (dir === -1 && idx === 0) return;
+  if (dir === +1 && idx === cells.length - 1) return;
+  const ref = dir === -1 ? cells[idx - 1] : cells[idx + 2];
+  cellsEl.insertBefore(cell, ref || null);
+}
+
+function deleteCell(cell){
+  // セルが1つしかない場合は削除させない
+  if (getCells().length <= 1) return;
+  if (!confirm('このセルを削除しますか？')) return;
+  cell.remove();
+}
+
+function addCell(code='', insertBefore=null){
+  const cellId = ++cellSeq;
+
+  const cell   = document.createElement('div'); cell.className = 'cell';
+  cell.dataset.cellId = cellId;
+
+  // --- 左カラム: ▶ + ↑ ↓ × ------------------------------------------------
+  const ctrl   = document.createElement('div'); ctrl.className = 'cell-ctrl';
+
   const runBtn = document.createElement('button'); runBtn.className='run'; runBtn.textContent='▶';
-  const body = document.createElement('div'); body.className='body';
+  runBtn.title = 'Run (Shift-Enter)';
+
+  const upBtn  = document.createElement('button'); upBtn.className='cmdbtn'; upBtn.textContent='↑';
+  upBtn.title  = 'Move up';
+  const dnBtn  = document.createElement('button'); dnBtn.className='cmdbtn'; dnBtn.textContent='↓';
+  dnBtn.title  = 'Move down';
+  const delBtn = document.createElement('button'); delBtn.className='cmdbtn delbtn'; delBtn.textContent='×';
+  delBtn.title = 'Delete cell';
+
+  ctrl.appendChild(runBtn);
+  ctrl.appendChild(upBtn);
+  ctrl.appendChild(dnBtn);
+  ctrl.appendChild(delBtn);
+
+  // --- 右カラム: editor + output -------------------------------------------
+  const body   = document.createElement('div'); body.className='body';
   const edWrap = document.createElement('div'); edWrap.className='editor';
-  const ta = document.createElement('textarea'); ta.value = code;
-  const outEl = document.createElement('div'); outEl.className='out';
-  edWrap.appendChild(ta); body.appendChild(edWrap); body.appendChild(outEl);
-  cell.appendChild(runBtn); cell.appendChild(body);
-  cellsEl.appendChild(cell);
+  const ta     = document.createElement('textarea'); ta.value = code;
+  const outEl  = document.createElement('div'); outEl.className='out';
+
+  edWrap.appendChild(ta);
+  body.appendChild(edWrap);
+  body.appendChild(outEl);
+
+  cell.appendChild(ctrl);
+  cell.appendChild(body);
+
+  if (insertBefore) {
+    cellsEl.insertBefore(cell, insertBefore);
+  } else {
+    cellsEl.appendChild(cell);
+  }
 
   const cm = CodeMirror.fromTextArea(ta, {
     mode:'perl', lineNumbers:true, indentUnit:4, tabSize:4,
     viewportMargin: Infinity,
-    extraKeys:{ 'Shift-Enter': () => runCell(cm, runBtn, outEl) }
+    extraKeys:{ 'Shift-Enter': () => runCell(cm, runBtn, outEl, cellId) }
   });
-  runBtn.addEventListener('click', () => runCell(cm, runBtn, outEl));
+
+  runBtn.addEventListener('click', () => runCell(cm, runBtn, outEl, cellId));
+  upBtn.addEventListener('click',  () => moveCell(cell, -1));
+  dnBtn.addEventListener('click',  () => moveCell(cell, +1));
+  delBtn.addEventListener('click', () => deleteCell(cell));
+
   cm.focus();
-  return cm;
+  return { cell, cm };
 }
 
-document.getElementById('addcell').addEventListener('click', () => addCell());
+// ---------------------------------------------------------------------------
+// Save / Load  (方針A — 独自 JSON、拡張子 .pdlnb)
+// ---------------------------------------------------------------------------
+const NOTEBOOK_VERSION = 1;
+
+function gatherNotebook(){
+  const cells = getCells().map(cell => {
+    const cm = cell._cm;   // attached below
+    return { code: cm ? cm.getValue() : '' };
+  });
+  return { version: NOTEBOOK_VERSION, cells };
+}
+
+// addCell 後に cm を cell に紐付ける（gatherNotebook から参照）
+// ※ addCell() の return 値を受け取るラッパー
+function addCellTracked(code='', insertBefore=null){
+  const { cell, cm } = addCell(code, insertBefore);
+  cell._cm = cm;    // DOM node に直接格納（GC対象にならない）
+  return { cell, cm };
+}
+
+document.getElementById('savebtn').addEventListener('click', async () => {
+  const nb   = gatherNotebook();
+  const json = JSON.stringify(nb, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+
+  // showSaveFilePicker が使えるブラウザ（Chrome/Edge）ではファイル選択ダイアログを出す
+  if (window.showSaveFilePicker) {
+    try {
+      const fh = await window.showSaveFilePicker({
+        suggestedName: 'notebook.pdlnb',
+        types: [{ description: 'PDL Notebook', accept: { 'application/json': ['.pdlnb', '.json'] } }],
+      });
+      const writable = await fh.createWritable();
+      await writable.write(blob);
+      await writable.close();
+    } catch (err) {
+      if (err.name !== 'AbortError') console.error('Save failed:', err);
+    }
+  } else {
+    // フォールバック: <a download> で ~/Downloads に保存（Safari / Firefox）
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url; a.download = 'notebook.pdlnb'; a.click();
+    URL.revokeObjectURL(url);
+  }
+});
+
+document.getElementById('loadbtn').addEventListener('click', () => {
+  document.getElementById('loadfile').click();
+});
+
+document.getElementById('loadfile').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => {
+    let nb;
+    try { nb = JSON.parse(ev.target.result); }
+    catch(err) { alert('ファイルのパースに失敗しました: ' + err.message); return; }
+    if (!nb.cells || !Array.isArray(nb.cells)) { alert('不正なノートブック形式です'); return; }
+    // 既存セルをすべて削除
+    cellsEl.innerHTML = '';
+    nb.cells.forEach(c => addCellTracked(c.code ?? ''));
+    if (nb.cells.length === 0) addCellTracked('');
+  };
+  reader.readAsText(file);
+  // 同じファイルを再度選べるようリセット
+  e.target.value = '';
+});
+
+// ---------------------------------------------------------------------------
+// Header buttons
+// ---------------------------------------------------------------------------
+document.getElementById('addcell').addEventListener('click', () => addCellTracked());
 document.getElementById('interrupt').addEventListener('click', () => {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type:'interrupt' }));
 });
 
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts: ArrowLeft/Right → '_key' event to the most-recently
+// run cell.  The kernel's on_change('_key') handler advances/retreats pages.
+// Only fires when focus is NOT inside a text input (so typing in a widget
+// or the CodeMirror editor is never intercepted).
+// ---------------------------------------------------------------------------
+
+document.addEventListener('keydown', (e) => {
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;   // don't steal widget/CM focus
+  if (e.key === 'ArrowLeft')  { e.preventDefault(); sendEvent('_key', 'prev', _lastCellId); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); sendEvent('_key', 'next', _lastCellId); }
+});
+
 connect();
-addCell('# Shift-Enter to run.  The last expression is shown as the result.\nmy $x = sequence(5);\n$x ** 2;');
+addCellTracked('# Shift-Enter to run.  The last expression is shown as the result.\nmy $x = sequence(5);\n$x ** 2;');
 </script>
 </body>
 </html>

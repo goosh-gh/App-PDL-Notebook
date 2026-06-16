@@ -184,6 +184,12 @@ _param('_ch_off',  0,                  type=>'number', min=>0,
     max=>($N_CH_ALL - $N_ROWS_VIS > 0 ? $N_CH_ALL - $N_ROWS_VIS : 0),
     step=>1,     label=>'Ch offset',   group=>'eeg');
 _param('_neg_up',  1,                  type=>'bool',   label=>'Neg-up', group=>'eeg');
+# Channel filter: comma-separated names; empty = show all (up to N_ROWS_VIS from ch_off)
+_param('channels', '',
+    type        => 'text',
+    label       => 'Channels (comma-sep, empty=all)',
+    placeholder => 'e.g. Fp1,F3,Cz,O1',
+    group       => 'eeg');
 
 # ═══════════════════════════════════════════════════════════════════════
 # 4. render callback
@@ -199,6 +205,7 @@ my $render = sub {
         _gain    => _value('_gain',    100.0),
         _ch_off  => _value('_ch_off',  0),
         _neg_up  => _value('_neg_up',  1),
+        channels => _value('channels', ''),
     );
 
     my $gain    = _gain_from_state(\%state);
@@ -208,6 +215,30 @@ my $render = sub {
     $t_end      = $DATA_MS if $t_end > $DATA_MS;
     my $ch_off  = _ch_off_from_state(\%state);
     my $neg_up  = $state{_neg_up} // 1;
+
+    # ── Channel filter ────────────────────────────────────────────────
+    # channels='' → show N_ROWS_VIS channels starting at ch_off (original behaviour)
+    # channels='Fp1,Cz,O1' → show exactly those channels (ch_off ignored)
+    my $ch_str = $state{channels} // '';
+    my @disp_ch;   # list of [ ch_idx, ch_name ] to display top→bottom
+    if ($ch_str =~ /\S/) {
+        # Parse comma-separated names, preserve order, skip unknowns
+        my %name2idx = map { $CH_NAMES[$_] => $_ } 0 .. $N_CH_ALL - 1;
+        for my $raw (split /,/, $ch_str) {
+            $raw =~ s/^\s+|\s+$//g;
+            push @disp_ch, [ $name2idx{$raw}, $raw ]
+                if defined $name2idx{$raw};
+        }
+    }
+    unless (@disp_ch) {
+        # No filter (or nothing matched): fall back to ch_off scrolling
+        for my $row (0 .. $N_ROWS_VIS - 1) {
+            my $ci = $ch_off + $row;
+            last if $ci >= $N_CH_ALL;
+            push @disp_ch, [ $ci, $CH_NAMES[$ci] ];
+        }
+    }
+    my $n_disp = scalar @disp_ch;
 
     my $idx0 = int($t_start / 1000.0 * $srate);
     my $idx1 = int($t_end   / 1000.0 * $srate) - 1;
@@ -226,21 +257,20 @@ my $render = sub {
     # Build figure
     my $fig = figure(width => $FIG_W, height => $FIG_H);
 
-    # GridSpec: N_ROWS_VIS waveform rows + 1 info row (fixed small height)
+    # GridSpec: n_disp waveform rows + 1 info row (fixed small height)
     my $info_ratio = 0.18;   # info row is 18% of one waveform row height
-    my @ratios = ((1) x $N_ROWS_VIS, $info_ratio);
-    my $gs = $fig->add_gridspec($N_ROWS_VIS + 1, 1,
+    my @ratios = ((1) x $n_disp, $info_ratio);
+    my $gs = $fig->add_gridspec($n_disp + 1, 1,
         height_ratios => \@ratios, hspace => 0.0);
 
     my @axes;
-    push @axes, $fig->add_subplot($gs->at($_, 0)) for 0 .. $N_ROWS_VIS - 1;
-    my $ax_info = $fig->add_subplot($gs->at($N_ROWS_VIS, 0));
+    push @axes, $fig->add_subplot($gs->at($_, 0)) for 0 .. $n_disp - 1;
+    my $ax_info = $fig->add_subplot($gs->at($n_disp, 0));
 
     # ── Waveform channels ────────────────────────────────────────────
     my $ml = 48; my $mr = 8;
-    for my $row (0 .. $N_ROWS_VIS - 1) {
-        my $ch_idx = $ch_off + $row;
-        last if $ch_idx >= $N_CH_ALL;
+    for my $row (0 .. $n_disp - 1) {
+        my ($ch_idx, $ch_name) = @{ $disp_ch[$row] };
         my $ax     = $axes[$row];
         my $y_full = $eeg->slice("($ch_idx),$idx0:$idx1");
         my ($t_plot, $y_plot);
@@ -254,7 +284,7 @@ my $render = sub {
         $ax->ylim($neg_up ? ($gain, -$gain) : (-$gain, $gain));
         $ax->tick_params(axis => 'x', labelbottom => 0, length => 0);
         $ax->tick_params(axis => 'y', labelleft   => 0, length => 0);
-        $ax->ylabel($CH_NAMES[$ch_idx]);
+        $ax->ylabel($ch_name);
         $ax->ylabel_rotation(0);
         $ax->margin_left($ml); $ax->margin_right($mr);
         $ax->margin_top(2);    $ax->margin_bottom(2);
@@ -267,15 +297,24 @@ my $render = sub {
 
         my $t_end_s   = ($t_start + $page_ms) / 1000.0;
         my $t_start_s = $t_start / 1000.0;
-        my $ch_max    = $N_CH_ALL - $N_ROWS_VIS;
-        my $ch_str    = $ch_max > 0
-            ? sprintf("ch %d-%d / %d", $ch_off+1, $ch_off+$N_ROWS_VIS, $N_CH_ALL)
-            : sprintf("%d ch", $N_CH_ALL);
+
+        # Ch range string: filtered vs scrolling
+        my $ch_str_disp;
+        if ($state{channels} =~ /\S/ && @disp_ch) {
+            $ch_str_disp = sprintf("ch: %s (%d/%d)",
+                join(',', map { $_->[1] } @disp_ch),
+                $n_disp, $N_CH_ALL);
+        } else {
+            my $ch_max = $N_CH_ALL - $N_ROWS_VIS;
+            $ch_str_disp = $ch_max > 0
+                ? sprintf("ch %d-%d / %d", $ch_off+1, $ch_off+$N_ROWS_VIS, $N_CH_ALL)
+                : sprintf("%d ch", $N_CH_ALL);
+        }
 
         # Time range (left)
         $ax_info->text(0.01, 0.75,
             sprintf("%.1f-%.1fs  |  %s  |  \xB1%.0f\xB5V  |  %s",
-                $t_start_s, $t_end_s, $ch_str, $gain,
+                $t_start_s, $t_end_s, $ch_str_disp, $gain,
                 $neg_up ? "neg\x{2191}" : "pos\x{2191}"),
             ha => 'left', va => 'center', fontsize => 8, color => '#2c3e50');
 
@@ -311,6 +350,23 @@ my $render = sub {
 eval {
     require App::PDL::Notebook::Reactive;
     App::PDL::Notebook::Reactive::on_change($render, 'eeg');
+
+    # ← → keyboard navigation: advance/retreat one page
+    App::PDL::Notebook::Reactive::on_change(sub {
+        my ($name, $val) = @_;
+        my $page_ms = App::PDL::Notebook::Reactive::value('_page_ms')
+                      // ($PAGE_SEC_INIT * 1000.0);
+        my $cur_pos = App::PDL::Notebook::Reactive::value('_pos') // 0.0;
+        my $max_t   = $DATA_MS - $page_ms;
+        $max_t = 0 if $max_t < 0;
+        # _pos is 0..1 fraction; one page forward/back = page_ms / max_t in pos units
+        my $page_pos = ($max_t > 0) ? ($page_ms / $max_t) : 1.0;
+        my $new_pos  = ($val eq 'next')
+            ? ($cur_pos + $page_pos > 1.0 ? 1.0 : $cur_pos + $page_pos)
+            : ($cur_pos - $page_pos < 0.0 ? 0.0 : $cur_pos - $page_pos);
+        App::PDL::Notebook::Reactive::set_value('_pos', $new_pos);
+        $render->();
+    }, '_key');
     1;
 };
 
